@@ -17,6 +17,7 @@
 #include <cstdio>
 
 #include <numeric>
+#include <map>
 #include <unordered_set>
 #include <unordered_map>
 #include <future>
@@ -314,6 +315,7 @@ DEFINE_int32(max_turns, 100000000, "max turn");
 DEFINE_int32(ss, 1, "sets the random seed. When negative, seed will be chosen at random.");
 DEFINE_int32(loop, 0, "run loops");
 
+vector<Fire> build_fire_timeline(const BeamSearchResult& result);
 class TakaptAI : public AI
 {
 public:
@@ -389,6 +391,8 @@ private:
             BeamSearchResult result = beamsearch(f, seq, frame_id, me, enemy, search_turns, good_chains);
             ++simu_i;
 
+            cerr << "timeline: " << (build_fire_timeline(result).size()) << endl;
+
             if (result.chains == -1)
             {
                 ++missed_search;
@@ -396,7 +400,7 @@ private:
             }
             else
             {
-                /* CHECK(!result.decisions.empty()); */
+                // CHECK(!result.decisions.empty());
                 Decision first_decision = result.decision;
                 CHECK(first_decision.isValid());
                 chains[first_decision.axisX()][first_decision.rot()].push_back(result.chains);
@@ -441,22 +445,51 @@ private:
     int current_turn = -1;
 };
 
-class DecisionEvaluator
+class FireEvaluator
 {
 public:
-    DecisionEvaluator(const BeamSearchResult& my_search_result, const BeamSearchResult& ene_search_result) :
-        my_search_result(my_search_result),
-        ene_search_result(ene_search_result)
+    FireEvaluator(const BeamSearchResult& my_result, const BeamSearchResult& enemy_result) :
+        my_result(my_result),
+        enemy_result(enemy_result)
     {
     }
 
-    void eval()
+    map<Decision, double> eval() const
     {
+        const auto my_fire_timeline = build_fire_timeline(my_result);
+
+        map<Decision, double> score_table;
+        for (auto& fire : my_fire_timeline)
+        {
+        }
     }
 
 private:
-    const BeamSearchResult& my_search_result;
-    const BeamSearchResult& ene_search_result;
+    vector<Fire> build_fire_timeline(const BeamSearchResult& result) const
+    {
+        vector<Fire> fires;
+        for (auto& f : result.fired)
+            fires.insert(fires.end(), f.begin(), f.end());
+
+        sort(fires.begin(), fires.end(),
+                [](const Fire& a, const Fire& b) {
+                return a.chain_end_frames < b.chain_end_frames;
+                });
+
+        int max_score = -1;
+        vector<Fire> timeline;
+        for (auto& fire : fires)
+        {
+            if (fire.score > max_score)
+            {
+                max_score = fire.score;
+                timeline.push_back(fire);
+            }
+        }
+        return timeline;
+    }
+
+    const BeamSearchResult& my_result, enemy_result;
 };
 
 class TakaptAI2 : public AI
@@ -493,6 +526,46 @@ private:
         LOG(INFO) << f.toDebugString() << nexts.toString();
 
 
+        int TL = 600;
+        int RETRY_TL = 300;
+        int SIMULATIONS = 5;
+
+        int missed_search = 0;
+        int good_chains = min(14, count_color_puyos_connected_from_start(me.field) / 5 + 4);
+        for (int simu_i = 0; ((simu_i < SIMULATIONS && good_chains > 0) || currentTimeInMillis() - start_time < RETRY_TL) && currentTimeInMillis() - start_time < TL; )
+        {
+            const int my_search_turns = max(max(10, nexts.size()), min(50, ((6 * 13) - me.field.countPuyos()) / 2 + 4));
+            const int enemy_search_turns = max(max(10, nexts.size()), min(50, ((6 * 13) - enemy.field.countPuyos()) / 2 + 4)) / 2;
+
+            const KumipuyoSeq rand_seq = KumipuyoSeqGenerator::generateRandomSequenceWithSeed(my_search_turns, simu_i);
+            KumipuyoSeq my_seq = me.seq;
+            KumipuyoSeq enemy_seq = enemy.seq;
+            my_seq.append(rand_seq);
+            enemy_seq.append(rand_seq);
+
+            BeamSearchResult my_result = beamsearch(me.field, my_seq, frame_id, me, enemy, my_search_turns, good_chains);
+            BeamSearchResult enemy_result = beamsearch(enemy.field, enemy_seq, frame_id, enemy, me, enemy_search_turns, good_chains);
+
+
+            ++simu_i;
+
+            if (my_result.chains == -1)
+            {
+                ++missed_search;
+                good_chains = max(good_chains - 1, 1);
+            }
+            else
+            {
+                // CHECK(!result.decisions.empty());
+                /* Decision first_decision = result.decision; */
+                /* CHECK(first_decision.isValid());           */
+                /* chains[first_decision.axisX()][first_decision.rot()].push_back(result.chains); */
+                /* if ((int)chains[first_decision.axisX()][first_decision.rot()].size() >= (SIMULATIONS + 1) / 2 && currentTimeInMillis() - start_time > RETRY_TL) */
+                /* {                                                                                                                                               */
+                /*     break;                                                                                                                                      */
+                /* }                                                                                                                                               */
+            }
+        }
     }
 
     int current_turn = -1;
