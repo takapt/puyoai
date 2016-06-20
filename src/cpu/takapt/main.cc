@@ -51,7 +51,21 @@ struct State
     }
 };
 
-void next_states(const State& current_state, const Kumipuyo& kumipuyo, const int good_chains, unordered_set<int64_t>& visited, int qi, vector<State>& state_q, vector<State>& fired)
+struct Fire
+{
+    CoreField field;
+
+    int chains;
+    int score;
+
+    int turn;
+    int ope_start_frames;
+    int chain_end_frames;
+
+    Decision first_decision;
+};
+
+void next_states(const State& current_state, const Kumipuyo& kumipuyo, const int good_chains, unordered_set<int64_t>& visited, const int qi, vector<State>& state_q, vector<Fire>& fired, const int turn)
 {
     auto drop_callback = [&](const RefPlan& plan)
     {
@@ -81,7 +95,19 @@ void next_states(const State& current_state, const Kumipuyo& kumipuyo, const int
                 current_state.prev_q_index == -1 ? plan.decision(0) : current_state.first_decision, // .first_decision
                 qi // .prev_q_index
             };
-            fired.push_back(next);
+            Fire fire = Fire {
+                field,
+
+                rensa_result.chains,
+                rensa_result.score,
+
+                turn,
+                current_state.frames,
+                frames,
+
+                current_state.prev_q_index == -1 ? plan.decision(0) : current_state.first_decision
+            };
+            fired.push_back(fire);
 
             if (rensa_result.chains >= good_chains)
                 return;
@@ -161,8 +187,9 @@ void next_states(const State& current_state, const Kumipuyo& kumipuyo, const int
 
 struct BeamSearchResult
 {
-    vector<Decision> decisions;
+    Decision decision;
     int chains;
+    vector<vector<Fire>> fired;
 };
 BeamSearchResult beamsearch(const CoreField& start_field, const KumipuyoSeq& seq, const int frame_id, const PlayerState& me, const PlayerState& enemy, const int turns, const int good_chains)
 {
@@ -172,22 +199,8 @@ BeamSearchResult beamsearch(const CoreField& start_field, const KumipuyoSeq& seq
     CHECK(turns >= 0);
     CHECK(seq.size() >= turns);
 
-    vector<vector<State>> fired(turns + 1);
+    vector<vector<Fire>> fired(turns + 1);
     vector<vector<State>> state_q(turns + 1);
-    const auto make_decisions = [&](const State& state, int turn)
-    {
-        vector<Decision> decisions;
-        decisions.push_back(state.decision);
-        for (int i = turn - 1, qi = state.prev_q_index; i > 0; --i)
-        {
-            CHECK(0 <= qi && qi < (int)state_q[i].size());
-            decisions.push_back(state_q[i][qi].decision);
-            qi = state_q[i][qi].prev_q_index;
-        }
-        reverse(decisions.begin(), decisions.end());
-        CHECK(!decisions.empty());
-        return decisions;
-    };
 
     const State init_state = State {
         start_field, // .field
@@ -212,14 +225,14 @@ BeamSearchResult beamsearch(const CoreField& start_field, const KumipuyoSeq& seq
 
         for (int qi = 0; qi < (int)state_q[turn].size(); ++qi)
         {
-            next_states(state_q[turn][qi], seq.get(turn), good_chains, visited, qi, state_q[turn + 1], fired[turn + 1]);
+            next_states(state_q[turn][qi], seq.get(turn), good_chains, visited, qi, state_q[turn + 1], fired[turn + 1], turn);
         }
 
         for (auto& state : fired[turn + 1])
         {
-            if (state.fired_chains > max_chains)
+            if (state.chains > max_chains)
             {
-                max_chains = state.fired_chains;
+                max_chains = state.chains;
                 first_decision_for_max_chains = state.first_decision;
             }
         }
@@ -240,14 +253,15 @@ BeamSearchResult beamsearch(const CoreField& start_field, const KumipuyoSeq& seq
 
     for (int turn = 0; turn <= turns; ++turn)
     {
-        std::sort(fired[turn].begin(), fired[turn].end(), [](const State& a, const State& b){ return a.score > b.score; });
-        for (const State& state : fired[turn])
+        std::sort(fired[turn].begin(), fired[turn].end(), [](const Fire& a, const Fire& b){ return a.score > b.score; });
+        for (const Fire& state : fired[turn])
         {
-            if (state.fired_chains == max_chains)
+            if (state.chains == max_chains)
             {
                 return BeamSearchResult {
-                    make_decisions(state, turn), // .decisions
-                    max_chains // .chains
+                    state.first_decision,
+                    max_chains, // .chains
+                    fired
                 };
             }
         }
@@ -267,7 +281,8 @@ BeamSearchResult beamsearch(const CoreField& start_field, const KumipuyoSeq& seq
 
     return BeamSearchResult {
         {}, // .decisions
-        -1 // .chains
+        -1, // .chains
+        {}
     };
 }
 
@@ -381,8 +396,8 @@ private:
             }
             else
             {
-                CHECK(!result.decisions.empty());
-                Decision first_decision = result.decisions.front();
+                /* CHECK(!result.decisions.empty()); */
+                Decision first_decision = result.decision;
                 CHECK(first_decision.isValid());
                 chains[first_decision.axisX()][first_decision.rot()].push_back(result.chains);
                 if ((int)chains[first_decision.axisX()][first_decision.rot()].size() >= (SIMULATIONS + 1) / 2 && currentTimeInMillis() - start_time > RETRY_TL)
@@ -421,6 +436,63 @@ private:
         cerr << endl;
 
         return DropDecision(best_decision);
+    }
+
+    int current_turn = -1;
+};
+
+class DecisionEvaluator
+{
+public:
+    DecisionEvaluator(const BeamSearchResult& my_search_result, const BeamSearchResult& ene_search_result) :
+        my_search_result(my_search_result),
+        ene_search_result(ene_search_result)
+    {
+    }
+
+    void eval()
+    {
+    }
+
+private:
+    const BeamSearchResult& my_search_result;
+    const BeamSearchResult& ene_search_result;
+};
+
+class TakaptAI2 : public AI
+{
+public:
+    TakaptAI2(int argc, char* argv[]) : AI(argc, argv, "takapt") {}
+    virtual ~TakaptAI2() {}
+
+    virtual DropDecision think(int frameId, const CoreField& f, const KumipuyoSeq& seq,
+                               const PlayerState& me, const PlayerState& enemy, bool fast) const override
+    {
+        UNUSED_VARIABLE(frameId);
+        UNUSED_VARIABLE(me);
+        UNUSED_VARIABLE(enemy);
+        UNUSED_VARIABLE(fast);
+        return eval(f, seq.subsequence(0, min(seq.size(), FLAGS_seen)), frameId, me, enemy, fast);
+    }
+
+    void onGameWillBegin(const FrameRequest&) override
+    {
+        current_turn = 0;
+    }
+
+    void onDecisionRequestedForMe(const FrameRequest&) override
+    {
+        ++current_turn;
+    }
+
+private:
+    DropDecision eval(const CoreField& f, const KumipuyoSeq& nexts, const int frame_id, const PlayerState& me, const PlayerState& enemy, const bool fast) const
+    {
+        const auto start_time = currentTimeInMillis();
+
+        LOG(INFO) << f.toDebugString() << nexts.toString();
+
+
     }
 
     int current_turn = -1;
